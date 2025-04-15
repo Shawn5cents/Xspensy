@@ -20,8 +20,7 @@ interface ChatResponse {
 }
 
 /**
- * Chat Service class
- * Handles AI chat interactions and financial operations
+ * Optimized Chat Service for token efficiency
  */
 class ChatService {
   private messages: ChatMessage[] = [];
@@ -29,10 +28,10 @@ class ChatService {
 
   constructor(
     private readonly mercuryConfig: MercuryConfig,
-    private readonly financialSummary: () => FinancialSummary,
+    private readonly financialSummary: () => Promise<FinancialSummary>,
     private readonly addTransaction: (type: 'income' | 'expense', amount: number, description: string) => Promise<Transaction>
   ) {
-    this.chatHistoryLimit = 50; // Default limit
+    this.chatHistoryLimit = 10; // Reduced history limit for token efficiency
   }
 
   /**
@@ -40,46 +39,43 @@ class ChatService {
    */
   async processMessage(message: string): Promise<ChatResponse> {
     try {
-      // Add user message to history
       this.addMessage('user', message);
-
-      // Prepare context for AI
+      const summary = await this.financialSummary();
+      
+      // Optimize context size
       const context = {
-        ...this.financialSummary(),
-        date: new Date().toLocaleDateString()
+        b: summary.balance,
+        i: summary.monthlyIncome,
+        e: summary.monthlyExpenses,
+        d: new Date().toLocaleDateString()
       };
 
-      // Call AI service with context
-      const response = await this.callAIService(message, context);
-
-      // Process the response
+      const response = await this.callDeepseekAPI(message, context);
       const processedResponse = await this.processAIResponse(response);
-
-      // Add AI response to history
       this.addMessage('assistant', processedResponse.content);
 
       return processedResponse;
     } catch (error) {
-      console.error('Error processing message:', error);
+      console.error('Error:', error);
       return {
         type: 'text',
-        content: 'Sorry, I encountered an error processing your request. Please try again.'
+        content: 'Error processing request.'
       };
     }
   }
 
   /**
-   * Call the AI service with context
+   * Call Deepseek API with optimized parameters
    */
-  private async callAIService(message: string, context: Record<string, unknown>): Promise<string> {
-    const response = await fetch(this.mercuryConfig.baseUrl, {
+  private async callDeepseekAPI(message: string, context: Record<string, unknown>): Promise<string> {
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.mercuryConfig.apiKey}`,
       },
       body: JSON.stringify({
-        model: this.mercuryConfig.model,
+        model: 'deepseek-chat',
         messages: [
           {
             role: 'system',
@@ -90,12 +86,15 @@ class ChatService {
             content: message
           }
         ],
-        max_tokens: this.mercuryConfig.tokenLimits.maxOutputTokens
+        max_tokens: 150,
+        temperature: 0.7,
+        top_p: 0.9,
+        frequency_penalty: 0.2
       })
     });
 
     if (!response.ok) {
-      throw new Error(`AI service error: ${response.statusText}`);
+      throw new Error(`API error: ${response.statusText}`);
     }
 
     const data = await response.json();
@@ -103,60 +102,52 @@ class ChatService {
   }
 
   /**
-   * Generate system prompt with context
+   * Generate minimal system prompt
    */
   private generateSystemPrompt(context: Record<string, unknown>): string {
-    return `
-You are an AI financial assistant named Finance Genius. Your role is to help users with financial tracking and advice.
-
-Current financial data:
-- Balance: ${context.balance || 'Unknown'}
-- Monthly Income: ${context.monthlyIncome || 'Unknown'}
-- Monthly Expenses: ${context.monthlyExpenses || 'Unknown'}
-- Today's date: ${context.date || new Date().toLocaleDateString()}
-
-If the message mentions an expense:
-1. Extract the amount (number)
-2. Extract what it was spent on
-3. Respond in a helpful way and include the new balance
-
-If the message mentions income:
-1. Extract the amount (number)
-2. Extract where it came from
-3. Respond in a helpful way and include the new balance
-
-If the user asks you to modify the app, create a feature, or change something about the app:
-1. Identify what feature they want to add or modify
-2. Generate a JSON response in the format:
-{
-  "type": "appModification",
-  "content": "Your friendly response explaining what will be done",
-  "modification": {
-    "type": "newFeature|updateFeature|fixIssue",
-    "featureName": "name of the feature",
-    "description": "detailed description of what should be implemented"
-  }
-}
-
-For regular financial questions, respond naturally as a helpful financial assistant.
-Keep responses concise but friendly.`;
+    return `Assistant with: B:$${context.b} I:$${context.i} E:$${context.e}. For expenses/income extract amount & description. Keep responses concise.`;
   }
 
   /**
-   * Process the AI response
+   * Extract transaction details from message
+   */
+  private extractTransaction(message: string): { type: 'income' | 'expense', amount: number, description: string } | null {
+    const expenseMatch = message.match(/(\d+(?:\.\d{2})?)\s+(?:on|for)\s+(.+?)(?:\.|$)/i);
+    if (expenseMatch) {
+      return {
+        type: 'expense',
+        amount: parseFloat(expenseMatch[1]),
+        description: expenseMatch[2].trim()
+      };
+    }
+
+    const incomeMatch = message.match(/(\d+(?:\.\d{2})?)\s+from\s+(.+?)(?:\.|$)/i);
+    if (incomeMatch) {
+      return {
+        type: 'income',
+        amount: parseFloat(incomeMatch[1]),
+        description: incomeMatch[2].trim()
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Process the AI response efficiently
    */
   private async processAIResponse(response: string): Promise<ChatResponse> {
     try {
-      // Check if response is JSON
-      if (response.trim().startsWith('{')) {
-        const jsonResponse = JSON.parse(response);
-        if (jsonResponse.type === 'appModification') {
-          return jsonResponse as ChatResponse;
+      // Check for JSON response (app modifications)
+      if (response.startsWith('{')) {
+        const parsed = JSON.parse(response);
+        if (parsed.type === 'appModification') {
+          return parsed;
         }
       }
 
       // Process potential transaction
-      const transaction = await this.extractTransaction(response);
+      const transaction = this.extractTransaction(response);
       if (transaction) {
         await this.addTransaction(
           transaction.type,
@@ -170,7 +161,7 @@ Keep responses concise but friendly.`;
         content: response
       };
     } catch (error) {
-      console.error('Error processing AI response:', error);
+      console.error('Error processing response:', error);
       return {
         type: 'text',
         content: response
@@ -179,33 +170,7 @@ Keep responses concise but friendly.`;
   }
 
   /**
-   * Extract transaction details from message
-   */
-  private async extractTransaction(message: string): Promise<{ type: 'income' | 'expense', amount: number, description: string } | null> {
-    // Simple regex-based extraction
-    const expenseMatch = message.match(/spent\s+\$?(\d+(?:\.\d{2})?)\s+on\s+(.+?)(?:\.|$)/i);
-    if (expenseMatch) {
-      return {
-        type: 'expense',
-        amount: parseFloat(expenseMatch[1]),
-        description: expenseMatch[2].trim()
-      };
-    }
-
-    const incomeMatch = message.match(/received\s+\$?(\d+(?:\.\d{2})?)\s+from\s+(.+?)(?:\.|$)/i);
-    if (incomeMatch) {
-      return {
-        type: 'income',
-        amount: parseFloat(incomeMatch[1]),
-        description: incomeMatch[2].trim()
-      };
-    }
-
-    return null;
-  }
-
-  /**
-   * Add a message to chat history
+   * Add message to chat history with size limit
    */
   private addMessage(role: 'user' | 'assistant', content: string): void {
     this.messages.push({
@@ -214,7 +179,7 @@ Keep responses concise but friendly.`;
       timestamp: new Date()
     });
 
-    // Maintain history limit
+    // Keep only recent messages
     if (this.messages.length > this.chatHistoryLimit) {
       this.messages = this.messages.slice(-this.chatHistoryLimit);
     }

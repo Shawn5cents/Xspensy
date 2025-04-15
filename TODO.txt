@@ -1,0 +1,44 @@
+# Xspensy TODO List
+
+## Immediate Tasks
+1. Add error retry mechanism to ChatService
+2. Implement rate limiting for API calls
+3. Set up message caching
+4. Write unit tests for ChatService
+5. Add proper logging system
+
+## Database Tasks
+1. Add user authentication support
+2. Implement data migrations
+3. Add transaction categories
+4. Set up data backups
+
+## Feature Tasks
+1. Add charts and visualizations
+2. Implement budget planning
+3. Add export functionality
+4. Create financial reports
+
+## Documentation Tasks
+1. Document API endpoints
+2. Create user guide
+3. Update deployment documentation
+
+## Testing Tasks
+1. Set up test environment
+2. Write integration tests
+3. Add E2E tests
+4. Set up CI/CD pipeline
+
+## Security Tasks
+1. Implement API key rotation
+2. Add rate limiting
+3. Set up proper CORS
+4. Add request validation
+
+## Completed Tasks
+✓ Set up Prisma with PostgreSQL
+✓ Implement basic transaction management
+✓ Optimize ChatService for token usage
+✓ Configure Deepseek API integration
+✓ Create ChatService documentation
