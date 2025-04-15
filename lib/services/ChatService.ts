@@ -1,5 +1,6 @@
 import { MercuryConfig } from './ConfigService';
 import type { Transaction, FinancialSummary } from '@/models/types';
+import { withRetry, type RetryConfig } from '@/lib/utils/retry';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -20,18 +21,24 @@ interface ChatResponse {
 }
 
 /**
- * Optimized Chat Service for token efficiency
+ * Optimized Chat Service with retry mechanism
  */
 class ChatService {
   private messages: ChatMessage[] = [];
   private readonly chatHistoryLimit: number;
+  private readonly retryConfig: RetryConfig = {
+    maxAttempts: 3,
+    delayMs: 1000,
+    backoffFactor: 2,
+    maxDelayMs: 5000
+  };
 
   constructor(
     private readonly mercuryConfig: MercuryConfig,
     private readonly financialSummary: () => Promise<FinancialSummary>,
     private readonly addTransaction: (type: 'income' | 'expense', amount: number, description: string) => Promise<Transaction>
   ) {
-    this.chatHistoryLimit = 10; // Reduced history limit for token efficiency
+    this.chatHistoryLimit = 10; // Reduced for token efficiency
   }
 
   /**
@@ -42,7 +49,7 @@ class ChatService {
       this.addMessage('user', message);
       const summary = await this.financialSummary();
       
-      // Optimize context size
+      // Construct minimal context
       const context = {
         b: summary.balance,
         i: summary.monthlyIncome,
@@ -50,16 +57,21 @@ class ChatService {
         d: new Date().toLocaleDateString()
       };
 
-      const response = await this.callDeepseekAPI(message, context);
+      const response = await withRetry(
+        () => this.callDeepseekAPI(message, context),
+        this.retryConfig
+      );
+
       const processedResponse = await this.processAIResponse(response);
       this.addMessage('assistant', processedResponse.content);
 
       return processedResponse;
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error processing message:', error);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
       return {
         type: 'text',
-        content: 'Error processing request.'
+        content: `Error: ${errorMsg}. Please try again.`
       };
     }
   }
@@ -94,7 +106,9 @@ class ChatService {
     });
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.statusText}`);
+      const error = new Error(`API error: ${response.statusText}`) as Error & { status: number };
+      error.status = response.status;
+      throw error;
     }
 
     const data = await response.json();
@@ -106,6 +120,40 @@ class ChatService {
    */
   private generateSystemPrompt(context: Record<string, unknown>): string {
     return `Assistant with: B:$${context.b} I:$${context.i} E:$${context.e}. For expenses/income extract amount & description. Keep responses concise.`;
+  }
+
+  /**
+   * Process the AI response with retry for transactions
+   */
+  private async processAIResponse(response: string): Promise<ChatResponse> {
+    try {
+      if (response.startsWith('{') && response.includes('"type":"appModification"')) {
+        return JSON.parse(response) as ChatResponse;
+      }
+
+      const transaction = this.extractTransaction(response);
+      if (transaction) {
+        await withRetry(
+          () => this.addTransaction(
+            transaction.type,
+            transaction.amount,
+            transaction.description
+          ),
+          this.retryConfig
+        );
+      }
+
+      return {
+        type: 'text',
+        content: response
+      };
+    } catch (error) {
+      console.error('Error processing AI response:', error);
+      return {
+        type: 'text',
+        content: response
+      };
+    }
   }
 
   /**
@@ -134,43 +182,7 @@ class ChatService {
   }
 
   /**
-   * Process the AI response efficiently
-   */
-  private async processAIResponse(response: string): Promise<ChatResponse> {
-    try {
-      // Check for JSON response (app modifications)
-      if (response.startsWith('{')) {
-        const parsed = JSON.parse(response);
-        if (parsed.type === 'appModification') {
-          return parsed;
-        }
-      }
-
-      // Process potential transaction
-      const transaction = this.extractTransaction(response);
-      if (transaction) {
-        await this.addTransaction(
-          transaction.type,
-          transaction.amount,
-          transaction.description
-        );
-      }
-
-      return {
-        type: 'text',
-        content: response
-      };
-    } catch (error) {
-      console.error('Error processing response:', error);
-      return {
-        type: 'text',
-        content: response
-      };
-    }
-  }
-
-  /**
-   * Add message to chat history with size limit
+   * Add message to chat history with limit
    */
   private addMessage(role: 'user' | 'assistant', content: string): void {
     this.messages.push({
@@ -179,7 +191,6 @@ class ChatService {
       timestamp: new Date()
     });
 
-    // Keep only recent messages
     if (this.messages.length > this.chatHistoryLimit) {
       this.messages = this.messages.slice(-this.chatHistoryLimit);
     }
